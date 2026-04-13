@@ -1,3 +1,7 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # Career-Ops -- AI Job Search Pipeline
 
 ## Origin
@@ -65,6 +69,10 @@ AI-powered job search automation built on Claude Code: pipeline tracking, offer 
 | `check-liveness.mjs` | Job posting liveness checker |
 | `liveness-core.mjs` | Shared liveness logic (expired signals win over generic Apply text) |
 | `reports/` | Evaluation reports (format: `{###}-{company-slug}-{YYYY-MM-DD}.md`). Blocks A-F + G (Posting Legitimacy). Header includes `**Legitimacy:** {tier}`. |
+| `outreach.mjs` | Outreach pipeline orchestrator |
+| `send-outreach.mjs` | LinkedIn connection sender (Playwright) |
+| `outreach-query-gen.mjs` | Search query generator from profile |
+| `outreach-db.mjs` | SQLite database layer for outreach |
 
 ### OpenCode Commands
 
@@ -193,6 +201,7 @@ Default modes are in `modes/` (English). Additional language-specific modes are 
 - **German (DACH market):** `modes/de/` — native German translations with DACH-specific vocabulary (13. Monatsgehalt, Probezeit, Kündigungsfrist, AGG, Tarifvertrag, etc.). Includes `_shared.md`, `angebot.md` (evaluation), `bewerben.md` (apply), `pipeline.md`.
 - **French (Francophone market):** `modes/fr/` — native French translations with France/Belgium/Switzerland/Luxembourg-specific vocabulary (CDI/CDD, convention collective SYNTEC, RTT, mutuelle, prévoyance, 13e mois, intéressement/participation, titres-restaurant, CSE, portage salarial, etc.). Includes `_shared.md`, `offre.md` (evaluation), `postuler.md` (apply), `pipeline.md`.
 - **Japanese (Japan market):** `modes/ja/` — native Japanese translations with Japan-specific vocabulary (正社員, 業務委託, 賞与, 退職金, みなし残業, 年俸制, 36協定, 通勤手当, 住宅手当, etc.). Includes `_shared.md`, `kyujin.md` (evaluation), `oubo.md` (apply), `pipeline.md`.
+- **Russian:** `modes/ru/` — Russian translations. Includes `_shared.md`, `oferta.md` (evaluation), `apply.md`, `interview-prep.md`, `pipeline.md`.
 
 **When to use German modes:** If the user is targeting German-language job postings, lives in DACH, or asks for German output. Either:
 1. User says "use German modes" → read from `modes/de/` instead of `modes/`
@@ -209,7 +218,12 @@ Default modes are in `modes/` (English). Additional language-specific modes are 
 2. User sets `language.modes_dir: modes/ja` in `config/profile.yml` → always use Japanese modes
 3. You detect a Japanese JD → suggest switching to Japanese modes
 
-**When NOT to:** If the user applies to English-language roles, even at French, German, or Japanese companies, use the default English modes.
+**When to use Russian modes:** If the user is targeting Russian-language job postings or asks for Russian output. Either:
+1. User says "use Russian modes" → read from `modes/ru/` instead of `modes/`
+2. User sets `language.modes_dir: modes/ru` in `config/profile.yml` → always use Russian modes
+3. You detect a Russian JD → suggest switching to Russian modes
+
+**When NOT to:** If the user applies to English-language roles, even at French, German, Japanese, or Russian companies, use the default English modes.
 
 ### Skill Modes
 
@@ -231,6 +245,7 @@ Default modes are in `modes/` (English). Additional language-specific modes are 
 | Batch processes offers | `batch` |
 | Asks about rejection patterns or wants to improve targeting | `patterns` |
 | Asks about follow-ups or application cadence | `followup` |
+| Asks to find and message startup leaders | `outreach` |
 
 ### CV Source of Truth
 
@@ -280,6 +295,7 @@ Default modes are in `modes/` (English). Additional language-specific modes are 
 ## Stack and Conventions
 
 - Node.js (mjs modules), Playwright (PDF + scraping), YAML (config), HTML/CSS (template), Markdown (data), Canva MCP (optional visual CV)
+- Dashboard TUI in Go (bubbletea) — lives in `dashboard/`
 - Scripts in `.mjs`, configuration in YAML
 - Output in `output/` (gitignored), Reports in `reports/`
 - JDs in `jds/` (referenced as `local:jds/{file}` in pipeline.md)
@@ -287,6 +303,66 @@ Default modes are in `modes/` (English). Additional language-specific modes are 
 - Report numbering: sequential 3-digit zero-padded, max existing + 1
 - **RULE: After each batch of evaluations, run `node merge-tracker.mjs`** to merge tracker additions and avoid duplications.
 - **RULE: NEVER create new entries in applications.md if company+role already exists.** Update the existing entry.
+
+## Development Commands
+
+### Setup
+
+```bash
+npm install
+npx playwright install chromium   # required for PDF + liveness
+```
+
+Optional (Nix): `direnv allow` activates `flake.nix` which pins Node.js, Bun, and Playwright browsers.
+
+### Test Suite
+
+```bash
+node test-all.mjs          # full test (63+ checks, includes dashboard Go build)
+node test-all.mjs --quick  # skip dashboard build — this is what CI runs
+```
+
+No per-file test runner — `test-all.mjs` is the single entry point. It checks: `.mjs` syntax, script execution, liveness classification, data contract, personal data leaks, absolute paths, mode file integrity, CLAUDE.md sections, VERSION format, and (full mode) Go dashboard build.
+
+### npm Scripts (utility)
+
+| Command | Purpose |
+|---------|---------|
+| `npm run doctor` | Validate prerequisites (Node >=18, Playwright, required files, fonts) |
+| `npm run verify` | Pipeline health check (statuses, dupes, links, scores) |
+| `npm run normalize` | Fix non-canonical statuses in applications.md |
+| `npm run dedup` | Remove duplicate tracker entries by company+role |
+| `npm run merge` | Merge `batch/tracker-additions/*.tsv` into applications.md |
+| `npm run pdf -- in.html out.pdf` | HTML → ATS-optimized PDF via Chromium |
+| `npm run sync-check` | Validate CV/profile consistency |
+| `npm run liveness -- <url>` | Check if job posting URL is still active |
+| `npm run scan` | Zero-token portal scanner (Greenhouse/Ashby/Lever APIs) |
+| `npm run update:check` | Check for upstream career-ops updates (JSON output) |
+| `npm run update` | Apply upstream update (system layer only) |
+| `npm run rollback` | Rollback last update |
+| `npm run outreach` | Run outreach pipeline orchestrator |
+| `npm run outreach:send` | Send approved LinkedIn connections |
+| `npm run outreach:login` | Open browser for LinkedIn login |
+| `npm run outreach:query` | Generate search queries from profile |
+
+Most scripts accept `--dry-run` to preview changes. See `docs/SCRIPTS.md` for full CLI reference.
+
+### Dashboard (Go TUI)
+
+```bash
+cd dashboard && go build -o career-dashboard .
+./career-dashboard
+```
+
+Requires Go 1.22+. Uses bubbletea. Reads from `data/applications.md` and `data/pipeline.md`.
+
+### Extended Docs
+
+- `docs/ARCHITECTURE.md` — system diagram and data flow
+- `docs/SCRIPTS.md` — full script CLI reference with flags and exit codes
+- `docs/SETUP.md` — first-time setup guide
+- `docs/CUSTOMIZATION.md` — profile, portals, and archetype customization
+- `docs/CODEX.md` — Codex-specific integration
 
 ### TSV Format for Tracker Additions
 
