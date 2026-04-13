@@ -1,0 +1,23 @@
+# Outreach Pipeline Configuration
+# Nexus-HeadHunter path (absolute)
+nexus_path: "/home/13843K/Desktop/mygitprojects/Nexus-HeadHunter"
+
+schedule:
+  interval_days: 3
+  max_leads_per_run: 15
+
+search:
+  # Auto-generated from profile.yml if empty. Add manual overrides here.
+  queries: []
+  title_filter:
+    - CTO
+    - CEO
+    - Founder
+    - "Head of Engineering"
+    - "VP Engineering"
+  exclude_companies: []
+
+linkedin:
+  chrome_data: "./outreach-chrome"
+  max_sends_per_day: 10
+  delay_between_sends: [30, 90]
