@@ -73,74 +73,130 @@ async function checkConnectionStatus(page) {
     return btns.map(b => ({
       tag: b.tagName,
       text: (b.textContent || '').trim().substring(0, 30),
-      ariaLabel: (b.getAttribute('aria-label') || '').substring(0, 50),
+      ariaLabel: (b.getAttribute('aria-label') || '').substring(0, 80),
     }));
   });
 
   const hasMessage = buttons.some(b => b.text === 'Message');
-  const hasConnect = buttons.some(b => b.text === 'Connect' || b.ariaLabel.includes('connect'));
+  const hasConnect = buttons.some(b => b.text === 'Connect' || b.ariaLabel.includes('Invite') || b.ariaLabel.includes('connect'));
   const hasPending = buttons.some(b => b.text === 'Pending' || b.ariaLabel.includes('Pending'));
+  const hasFollow = buttons.some(b => b.text === 'Follow' && !hasConnect);
+  const hasMore = buttons.some(b => b.text === 'More');
 
   if (hasPending) return 'pending';
   if (hasMessage && !hasConnect) return 'connected';
   if (hasConnect) return 'not_connected';
+  // If no Connect visible but More button exists, Connect is likely hidden in More
+  if (hasMore) return 'not_connected_in_more';
+  if (hasFollow) return 'not_connected_in_more';
   return 'unknown';
 }
 
 async function sendConnectionRequest(page, note) {
-  // Find and click Connect button
-  const connectBtn = await page.$('button:has-text("Connect")');
-  if (!connectBtn) {
-    // Check More dropdown
-    const moreBtn = await page.$('button:has-text("More")');
-    if (moreBtn) {
-      await moreBtn.click();
-      await sleep(1500);
-      const connectInMore = await page.$('[role="menuitem"]:has-text("Connect")');
-      if (connectInMore) {
-        await connectInMore.click();
-      } else {
-        return { success: false, reason: 'No Connect option in More menu' };
-      }
-    } else {
-      return { success: false, reason: 'Connect button not found' };
+  // Strategy: try direct Connect first, then always fall back to More > Connect
+  let connected = false;
+
+  // Try 1: Direct Connect button on the profile
+  const connectBtn = await page.$('button:has-text("Connect"):not([aria-label*="Pending"])');
+  if (connectBtn) {
+    const btnText = await connectBtn.textContent();
+    if (btnText?.trim() === 'Connect') {
+      await connectBtn.click();
+      connected = true;
     }
-  } else {
-    await connectBtn.click();
   }
 
-  await sleep(2000);
+  // Try 2: More dropdown > Connect (most common on LinkedIn)
+  if (!connected) {
+    const moreBtns = await page.$$('button');
+    for (const btn of moreBtns) {
+      const text = (await btn.textContent())?.trim();
+      if (text === 'More' || text?.startsWith('More')) {
+        await btn.click();
+        await sleep(2000);
 
-  // Click "Add a note"
+        // Look for Connect in the dropdown menu
+        const menuItems = await page.$$('[role="menuitem"], [role="listitem"] button, li button, div[role="menu"] button');
+        let found = false;
+        for (const item of menuItems) {
+          const itemText = (await item.textContent())?.trim();
+          if (itemText?.includes('Connect')) {
+            await item.click();
+            connected = true;
+            found = true;
+            break;
+          }
+        }
+
+        // Also try generic selector for Connect in dropdown
+        if (!found) {
+          const connectInMenu = await page.$('div[role="menu"] >> text=Connect')
+            || await page.$('.artdeco-dropdown__content >> text=Connect');
+          if (connectInMenu) {
+            await connectInMenu.click({ force: true });
+            connected = true;
+          }
+        }
+        break;
+      }
+    }
+  }
+
+  if (!connected) {
+    return { success: false, reason: 'Connect button not found (checked direct and More menu)' };
+  }
+
+  await sleep(2500);
+
+  // Click "Add a note" if the modal appears
   const addNoteBtn = await page.$('button:has-text("Add a note")');
   if (addNoteBtn) {
     await addNoteBtn.click();
     await sleep(1000);
   }
 
-  // Fill note (truncate to 300 chars for LinkedIn limit)
+  // Fill note (truncate to 295 chars for LinkedIn limit)
   const truncatedNote = note.substring(0, 295);
-  const textarea = await page.$('textarea[name="message"]') || await page.$('#custom-message') || await page.$('textarea');
+  const textarea = await page.$('textarea[name="message"]')
+    || await page.$('#custom-message')
+    || await page.$('textarea[id*="connect"]')
+    || await page.$('textarea');
   if (textarea) {
     await textarea.fill(truncatedNote);
     await sleep(500);
+  } else {
+    // If no textarea, LinkedIn may have sent without a note option
+    // Check if it already sent
+    const pendingCheck = await page.$('button:has-text("Pending")');
+    if (pendingCheck) return { success: true, type: 'connection_request_no_note' };
   }
 
-  // Click Send
-  const sendBtn = await page.$('button:has-text("Send")');
-  if (sendBtn) {
-    await sendBtn.click();
-    await sleep(2000);
+  // Click Send (try multiple selectors)
+  const sendSelectors = [
+    'button:has-text("Send")',
+    'button[aria-label="Send now"]',
+    'button[aria-label*="Send"]',
+  ];
+  for (const sel of sendSelectors) {
+    const sendBtn = await page.$(sel);
+    if (sendBtn) {
+      await sendBtn.click();
+      await sleep(2000);
 
-    // Check for rate limit
-    const errorModal = await page.$('.artdeco-modal:has-text("limit")');
-    if (errorModal) {
-      return { success: false, reason: 'rate_limited' };
+      // Check for rate limit
+      const errorModal = await page.$('.artdeco-modal:has-text("limit")');
+      if (errorModal) {
+        return { success: false, reason: 'rate_limited' };
+      }
+      return { success: true, type: 'connection_request' };
     }
-    return { success: true, type: 'connection_request' };
   }
 
-  return { success: false, reason: 'Send button not found' };
+  // If we got here, maybe it sent without needing Send button
+  const pendingCheck = await page.$('button:has-text("Pending")');
+  if (pendingCheck) return { success: true, type: 'connection_request' };
+
+  return { success: false, reason: 'Send button not found after filling note' };
 }
 
 async function sendDirectMessage(page, message) {
@@ -290,13 +346,13 @@ async function main() {
             console.log(`  FAILED: ${result.reason}\n`);
             results.push({ ...target, status: 'failed', reason: result.reason });
           }
-        } else if (status === 'not_connected') {
-          // Send connection request with note
-          console.log('  Sending connection request...');
+        } else if (status === 'not_connected' || status === 'not_connected_in_more') {
+          // Send connection request with note (tries direct Connect, then More > Connect)
+          console.log(`  Sending connection request${status === 'not_connected_in_more' ? ' (via More menu)' : ''}...`);
           const result = await sendConnectionRequest(page, message);
           if (result.success) {
-            console.log('  SENT (Connection request)\n');
-            results.push({ ...target, status: 'sent', reason: 'connection_request' });
+            console.log(`  SENT (${result.type})\n`);
+            results.push({ ...target, status: 'sent', reason: result.type });
           } else if (result.reason === 'rate_limited') {
             console.log('  RATE LIMITED — stopping all sends\n');
             results.push({ ...target, status: 'rate_limited', reason: 'rate_limited' });
