@@ -75,7 +75,11 @@ function callBridge(nexusPath, scriptName, input) {
     throw new Error(`Bridge script not found: ${scriptPath}`);
   }
 
-  const result = spawnSync('python3', [scriptPath], {
+  // Use venv Python if available, otherwise fall back to python3
+  const venvPython = join(nexusPath, '.venv', 'bin', 'python3');
+  const pythonBin = existsSync(venvPython) ? venvPython : 'python3';
+
+  const result = spawnSync(pythonBin, [scriptPath], {
     cwd: nexusPath,
     input: JSON.stringify(input),
     encoding: 'utf-8',
