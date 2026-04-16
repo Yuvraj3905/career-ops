@@ -23,9 +23,13 @@ import {
   updateDraft,
   updateStatus,
   getLeadsByStatus,
+  getLeadsForEmailDiscovery,
+  getLeadsForEmailSending,
   leadExists,
   getStats,
+  getEmailStats,
   getTodaySendCount,
+  getTodayEmailSendCount,
   closeDb,
 } from './outreach-db.mjs';
 
@@ -344,6 +348,38 @@ async function runDrafting(outreachConfig, profile, cv, dryRun) {
   }
 }
 
+/**
+ * Stage 2.5: Email Discovery -- find and verify email addresses for enriched leads.
+ * Calls email-discover.mjs as a subprocess.
+ * @param {boolean} dryRun
+ */
+async function runEmailDiscovery(dryRun) {
+  const leads = getLeadsForEmailDiscovery();
+
+  if (leads.length === 0) {
+    process.stderr.write('[email-discover] No leads pending email discovery.\n');
+    return;
+  }
+
+  process.stderr.write(`[email-discover] Running discovery for ${leads.length} lead(s)...\n`);
+
+  const scriptPath = join(__dirname, 'email-discover.mjs');
+  const args = dryRun ? ['--dry-run'] : [];
+  const result = spawnSync('node', [scriptPath, ...args], {
+    cwd: __dirname,
+    encoding: 'utf-8',
+    timeout: 300000, // 5 min timeout for SMTP checks
+    stdio: ['pipe', 'inherit', 'inherit'],
+    env: { ...process.env },
+  });
+
+  if (result.error) {
+    process.stderr.write(`[email-discover] Error: ${result.error.message}\n`);
+  } else if (result.status !== 0) {
+    process.stderr.write(`[email-discover] Exited with code ${result.status}\n`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Command: scan
 // ---------------------------------------------------------------------------
@@ -367,6 +403,7 @@ async function cmdScan(outreachConfig, profile, cv, dryRun) {
 
   await runScout(outreachConfig, queries, dryRun);
   await runEnrichment(outreachConfig, dryRun);
+  await runEmailDiscovery(dryRun);
   await runDrafting(outreachConfig, profile, cv, dryRun);
 
   process.stderr.write('[scan] Pipeline complete.\n');
@@ -381,7 +418,6 @@ function cmdReview() {
   const draftedLeads = getLeadsByStatus('drafted');
 
   const queue = draftedLeads.map((lead) => {
-    // Check if we've already applied to this company
     let appliedMatch = null;
     if (lead.company) {
       const key = lead.company.toLowerCase().trim();
@@ -389,6 +425,13 @@ function cmdReview() {
         const app = appliedIndex.get(key);
         appliedMatch = `Already applied to ${lead.company} (Report #${app.reportNum.padStart(3, '0')}, Score ${app.score})`;
       }
+    }
+
+    // Determine available channels
+    const channels = [];
+    if (lead.connection_note) channels.push('linkedin');
+    if (lead.verified_email && (lead.email_status === 'verified' || lead.email_status === 'unverifiable')) {
+      channels.push('email');
     }
 
     return {
@@ -401,8 +444,11 @@ function cmdReview() {
       recent_posts: lead.recent_posts ? JSON.parse(lead.recent_posts) : [],
       rag_hook: lead.rag_hook,
       connection_note: lead.connection_note,
+      verified_email: lead.verified_email,
+      email_status: lead.email_status,
       email_subject: lead.email_subject,
       email_body: lead.email_body,
+      channels,
       profile_url: lead.profile_url,
       applied_match: appliedMatch,
       discovered_at: lead.discovered_at,
@@ -419,6 +465,8 @@ function cmdReview() {
 function cmdStatus() {
   const { total, byStatus } = getStats();
   const sentToday = getTodaySendCount();
+  const emailSentToday = getTodayEmailSendCount();
+  const emailStats = getEmailStats();
 
   const output = {
     total,
@@ -432,6 +480,10 @@ function cmdStatus() {
     unreachable: byStatus.unreachable ?? 0,
     draft_failed: byStatus.draft_failed ?? 0,
     sent_today: sentToday,
+    email: {
+      ...emailStats,
+      sent_today: emailSentToday,
+    },
   };
 
   console.log(JSON.stringify(output, null, 2));
@@ -452,9 +504,10 @@ async function main() {
         'Usage: node outreach.mjs <command> [--dry-run]',
         '',
         'Commands:',
-        '  scan     Run Scout → Investigator → Copywriter pipeline',
-        '  review   Output pending drafted leads as JSON',
-        '  status   Output pipeline stats as JSON',
+        '  scan          Run Scout > Investigator > Email Discover > Copywriter pipeline',
+        '  review        Output pending drafted leads as JSON',
+        '  status        Output pipeline stats as JSON',
+        '  send-emails   Send emails to approved leads with verified addresses',
         '',
         'Flags:',
         '  --dry-run  List queries / leads without calling bridges or writing to DB',
@@ -463,7 +516,7 @@ async function main() {
     process.exit(0);
   }
 
-  if (!['scan', 'review', 'status'].includes(command)) {
+  if (!['scan', 'review', 'status', 'send-emails'].includes(command)) {
     process.stderr.write(`Unknown command: ${command}\n`);
     process.exit(1);
   }
@@ -488,6 +541,21 @@ async function main() {
       case 'status':
         cmdStatus();
         break;
+      case 'send-emails': {
+        const scriptPath = join(__dirname, 'send-email.mjs');
+        const sendArgs = dryRun ? ['--dry-run'] : [];
+        const result = spawnSync('node', [scriptPath, ...sendArgs], {
+          cwd: __dirname,
+          encoding: 'utf-8',
+          timeout: 600000,
+          stdio: 'inherit',
+          env: { ...process.env },
+        });
+        if (result.error) {
+          process.stderr.write(`Error: ${result.error.message}\n`);
+        }
+        break;
+      }
     }
   } finally {
     closeDb();
