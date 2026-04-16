@@ -18,7 +18,8 @@
     "outreach": "node outreach.mjs",
     "outreach:send": "node send-outreach.mjs",
     "outreach:login": "node send-outreach.mjs --login",
-    "outreach:query": "node outreach-query-gen.mjs"
+    "outreach:query": "node outreach-query-gen.mjs",
+    "outreach:email": "node send-email.mjs"
   },
   "keywords": [
     "ai",
@@ -37,6 +38,7 @@
   "dependencies": {
     "better-sqlite3": "^12.9.0",
     "js-yaml": "^4.1.1",
+    "nodemailer": "^8.0.5",
     "playwright": "^1.58.1"
   }
 }
