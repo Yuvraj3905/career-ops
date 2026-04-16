@@ -39,7 +39,10 @@ CREATE TABLE IF NOT EXISTS leads (
   enriched_at TEXT,
   drafted_at TEXT,
   sent_at TEXT,
-  error TEXT
+  error TEXT,
+  verified_email TEXT,
+  email_status TEXT DEFAULT NULL,
+  email_sent_at TEXT
 );
 `;
 
@@ -63,6 +66,16 @@ export function getDb() {
   _db = new Database(DB_PATH);
   _db.pragma('journal_mode = WAL');
   _db.exec(CREATE_TABLE_SQL);
+
+  // Migrate: add email columns if they don't exist
+  const migrations = [
+    'ALTER TABLE leads ADD COLUMN verified_email TEXT',
+    'ALTER TABLE leads ADD COLUMN email_status TEXT DEFAULT NULL',
+    'ALTER TABLE leads ADD COLUMN email_sent_at TEXT',
+  ];
+  for (const sql of migrations) {
+    try { _db.exec(sql); } catch (_) { /* column already exists */ }
+  }
 
   return _db;
 }
@@ -173,6 +186,99 @@ export function updateStatus(profileUrl, status, error = null) {
     sent_at: new Date().toISOString(),
     error,
   });
+}
+
+/**
+ * Update a lead with a verified email address.
+ * @param {string} profileUrl
+ * @param {string|null} verifiedEmail
+ * @param {string} emailStatus - 'verified' | 'unverifiable'
+ */
+export function updateVerifiedEmail(profileUrl, verifiedEmail, emailStatus) {
+  const db = getDb();
+  const stmt = db.prepare(`
+    UPDATE leads SET
+      verified_email = @verified_email,
+      email_status   = @email_status
+    WHERE profile_url = @profile_url
+  `);
+  stmt.run({
+    profile_url: profileUrl,
+    verified_email: verifiedEmail,
+    email_status: emailStatus,
+  });
+}
+
+/**
+ * Mark a lead's email as sent.
+ * @param {string} profileUrl
+ */
+export function updateEmailSent(profileUrl) {
+  const db = getDb();
+  const stmt = db.prepare(`
+    UPDATE leads SET
+      email_status  = 'sent',
+      email_sent_at = @email_sent_at
+    WHERE profile_url = @profile_url
+  `);
+  stmt.run({
+    profile_url: profileUrl,
+    email_sent_at: new Date().toISOString(),
+  });
+}
+
+/**
+ * Get enriched leads that haven't had email discovery yet.
+ * @returns {object[]}
+ */
+export function getLeadsForEmailDiscovery() {
+  const db = getDb();
+  return db.prepare(
+    "SELECT * FROM leads WHERE status IN ('enriched', 'drafted', 'approved') AND (email_status IS NULL OR email_status = 'pending') ORDER BY discovered_at DESC"
+  ).all();
+}
+
+/**
+ * Get approved leads with verified emails that haven't been emailed yet.
+ * @returns {object[]}
+ */
+export function getLeadsForEmailSending() {
+  const db = getDb();
+  return db.prepare(
+    "SELECT * FROM leads WHERE status = 'approved' AND verified_email IS NOT NULL AND email_status = 'verified' ORDER BY discovered_at DESC"
+  ).all();
+}
+
+/**
+ * Count how many emails were sent today (UTC date).
+ * @returns {number}
+ */
+export function getTodayEmailSendCount() {
+  const db = getDb();
+  const today = new Date().toISOString().slice(0, 10);
+  const row = db.prepare(
+    "SELECT COUNT(*) AS count FROM leads WHERE email_status = 'sent' AND email_sent_at LIKE ?"
+  ).get(`${today}%`);
+  return row ? row.count : 0;
+}
+
+/**
+ * Return email-specific stats.
+ * @returns {{ verified: number, unverifiable: number, sent: number, pending: number, bounced: number }}
+ */
+export function getEmailStats() {
+  const db = getDb();
+  const rows = db.prepare(
+    'SELECT email_status, COUNT(*) AS count FROM leads WHERE email_status IS NOT NULL GROUP BY email_status'
+  ).all();
+
+  const stats = { verified: 0, unverifiable: 0, sent: 0, pending: 0, bounced: 0 };
+  for (const row of rows) {
+    if (row.email_status in stats) {
+      stats[row.email_status] = row.count;
+    }
+  }
+  return stats;
 }
 
 /**
