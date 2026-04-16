@@ -21,3 +21,13 @@ linkedin:
   chrome_data: "./outreach-chrome"
   max_sends_per_day: 10
   delay_between_sends: [30, 90]
+
+email:
+  sender_email: ""          # defaults to profile.yml candidate.email if empty
+  app_password: ""          # Gmail App Password (REQUIRED for sending)
+  max_sends_per_day: 15
+  delay_between_sends: [180, 480]   # 3-8 minutes in seconds
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 587
+  verify_timeout_ms: 5000          # SMTP verification timeout per address
+  max_verifications_per_second: 2
