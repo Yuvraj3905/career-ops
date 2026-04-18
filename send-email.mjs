@@ -12,7 +12,11 @@
  */
 
 import nodemailer from 'nodemailer';
+import dns from 'node:dns';
 import { readFileSync, existsSync } from 'node:fs';
+
+// Prefer IPv4 to avoid ENETUNREACH on networks without IPv6
+dns.setDefaultResultOrder('ipv4first');
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
@@ -81,15 +85,21 @@ async function main() {
 
   // Validate email config
   const emailConfig = outreach.email ?? {};
-  const appPassword = emailConfig.app_password;
+  const appPassword = process.env.GMAIL_APP_PASSWORD || emailConfig.app_password;
   if (!appPassword) {
     console.error(
       [
         'Email sending requires a Gmail App Password.',
         '',
-        '1. Go to myaccount.google.com/apppasswords',
-        '2. Generate a password for "Mail"',
-        '3. Paste it into config/outreach.yml under email.app_password',
+        'Option 1 (recommended): Set the GMAIL_APP_PASSWORD environment variable',
+        '  export GMAIL_APP_PASSWORD="your-app-password"',
+        '',
+        'Option 2: Add it to config/outreach.yml under email.app_password',
+        '  (NOT recommended — risk of committing secrets to git)',
+        '',
+        'To generate an App Password:',
+        '  1. Go to myaccount.google.com/apppasswords',
+        '  2. Generate a password for "Mail"',
         '',
         'No emails were sent.',
       ].join('\n')
@@ -107,7 +117,7 @@ async function main() {
   const maxPerDay = emailConfig.max_sends_per_day ?? 15;
   const delayRange = emailConfig.delay_between_sends ?? [180, 480];
   const smtpHost = emailConfig.smtp_host ?? 'smtp.gmail.com';
-  const smtpPort = emailConfig.smtp_port ?? 587;
+  const smtpPort = emailConfig.smtp_port ?? 465;
 
   // Check daily limit
   const todaySent = getTodayEmailSendCount();
@@ -152,7 +162,7 @@ async function main() {
   const transporter = nodemailer.createTransport({
     host: smtpHost,
     port: smtpPort,
-    secure: false, // TLS via STARTTLS
+    secure: smtpPort === 465, // true for port 465 (SSL), false for 587 (STARTTLS)
     auth: {
       user: senderEmail,
       pass: appPassword,
